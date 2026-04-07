@@ -154,7 +154,7 @@ app.post("/api/validate-session", async (req, res) => {
 
 // POST /api/batch-check
 // Body: { keys: string[] }
-// Checks status of multiple activation keys
+// Checks status of multiple activation keys using a single batch API call
 app.post("/api/batch-check", async (req, res) => {
   const { keys } = req.body;
   if (!Array.isArray(keys) || keys.length === 0) {
@@ -164,36 +164,38 @@ app.post("/api/batch-check", async (req, res) => {
     return res.json({ success: false, message: "Maximum 100 keys per batch check." });
   }
 
-  const results = await Promise.all(
-    keys.map(async (key: string) => {
-      const k = String(key).trim();
-      if (!k) return { key: k, status: "invalid", message: "Empty key" };
-      try {
-        const data = await apiCall("GET", `/key/${encodeURIComponent(k)}/status`);
-        if (!data.success) {
-          return { key: k, status: "invalid", message: data.message || "Invalid key" };
-        }
-        const d = data.data;
-        if (d.status === "available") {
-          return { key: k, status: "available", type: d.subscription || "ChatGPT Plus" };
-        } else if (d.status === "used" || d.status === "activated") {
-          return {
-            key: k,
-            status: "used",
-            activatedFor: d.activated_for ?? d.used_by ?? d.email ?? null,
-            activatedAt: d.activated_at ?? d.used_at ?? null,
-          };
-        } else if (d.status === "expired") {
-          return { key: k, status: "expired" };
-        }
-        return { key: k, status: d.status || "unknown" };
-      } catch {
-        return { key: k, status: "error", message: "Check failed" };
-      }
-    })
-  );
+  const cleanKeys = keys.map((k: string) => String(k).trim()).filter(Boolean);
 
-  return res.json({ success: true, results });
+  try {
+    const data = await apiCall("POST", "/keys/batch-status", { keys: cleanKeys });
+    if (!data.success) {
+      return res.json({ success: false, message: data.message || "Batch check failed." });
+    }
+
+    // Normalize the response array into a consistent format
+    const results = (data.data || []).map((item: any) => {
+      const key = item.key || item.cdk || "";
+      const status = item.status;
+      if (status === "available") {
+        return { key, status: "available", type: item.subscription || item.type || "ChatGPT Plus" };
+      } else if (status === "used" || status === "activated") {
+        return {
+          key,
+          status: "used",
+          activatedFor: item.activated_for ?? item.used_by ?? item.email ?? null,
+          activatedAt: item.activated_at ?? item.used_at ?? null,
+        };
+      } else if (status === "expired") {
+        return { key, status: "expired" };
+      }
+      return { key, status: "invalid", message: item.message || "Invalid key" };
+    });
+
+    return res.json({ success: true, results });
+  } catch (err) {
+    console.error("[batch-check] error:", err);
+    return res.status(500).json({ success: false, message: "Batch check service unavailable. Please try again." });
+  }
 });
 
 // POST /api/activate
